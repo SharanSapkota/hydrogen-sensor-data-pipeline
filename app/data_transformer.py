@@ -1,0 +1,4 @@
+def jsonToMatrix(jsonData):
+    sensorData = {
+        
+    }
