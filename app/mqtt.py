@@ -1,27 +1,31 @@
+import paho.mqtt.client as mqtt
+import json
+
 class MqttClient:
-    def __init__(self, brokerIp: str, brokerPort: str, topic: str, on_data):
-        self.brokerIp = brokerIp
-        self.brokerPort = brokerPort
-        self.topic = topic
-        self.client = mqtt.client()
+    def __init__(self, broker: str, port: int, topic: str, on_data):
+        self.broker   = broker
+        self.port     = port
+        self.topic    = topic
+        self.on_data  = on_data
+        self.client   = mqtt.Client()          
         self.client.on_connect = self._on_connect
-        self.client.on_message = self._on_message
-        self.on_data = on_data
+        self.client.on_message = self._on_message     
 
     def connect(self):
-        self.client.connect(self.brokerIp, self.brokerPort)
-        self.client.loop_start()
-    
-    def disconnect(self):
-        self.client.disconnect
+        self.client.connect(self.broker, self.port)
+        self.client.loop_forever()                
 
+    def disconnect(self):
+        self.client.disconnect()                 
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            print("Connection successful!")
+            print("Connected to broker!")
             self.client.subscribe(self.topic)
-    
-    def on_message(self, client, userdata, message):
-        payload = message.payload.decode("utf-8")
+        else:
+            print(f"Failed to connect, rc={rc}")
+
+    def _on_message(self, client, userdata, message):   
+        payload = json.loads(message.payload.decode("utf-8")) 
         self.on_data(payload)
-        print("recieved")
+        print("Received message")
