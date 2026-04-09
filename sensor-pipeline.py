@@ -1,0 +1,176 @@
+import time
+import json
+from collections import deque
+import uuid
+from datetime import datetime, timezone
+from threading import Thread
+import joblib         
+import numpy as np    
+import paho.mqtt.client as mqtt
+
+
+BROKER                  = "localhost"
+PORT                    = 1883
+TOPIC_SENSORS           = "h2/sensor/mq5"
+TOPIC_RESULTS           = "hydrogen/results"
+TOTAL_NUMBER_OF_SENSORS = 1
+LEAK_PPM_THRESHOLD      = 1000
+PREDICTION_INTERVAL     = 5
+
+model = joblib.load("model.pkl")
+
+sensor_buffer: dict = {}
+
+
+class MqttClient:
+    def __init__(self, broker: str, port: int, topic: str, on_data):
+        self.broker   = broker
+        self.port     = port
+        self.topic    = topic
+        self.on_data  = on_data
+        self.client   = mqtt.Client()
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
+
+    def connect(self):
+        print(f"[MQTT] Connection successful:")
+        self.client.connect(self.broker, self.port)
+        self.client.loop_forever()
+
+    def disconnect(self):
+        self.client.disconnect()
+
+    def publish(self, topic: str, payload: dict):
+        self.client.publish(topic, json.dumps(payload))
+        print(f"[MQTT] Published to {topic}")
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            print(f"[MQTT] Connected to broker at {self.broker}:{self.port}")
+            self.client.subscribe(self.topic)
+        else:
+            print(f"[MQTT] Failed to connect, rc={rc}")
+
+    def _on_message(self, client, userdata, message):
+        try:
+            payload = json.loads(message.payload.decode("utf-8"))
+            self.on_data(payload, client)
+        except Exception as e:
+            print(f"[MQTT] Failed to parse message: {e}")
+
+
+history_buffer = deque(maxlen=10)
+
+def handle_mqtt_data(data: dict, client):
+    sensor_id   = "1"
+    ppm         = data["ppm"]
+    humidity    = data["humidity"]    # CHANGED: read from data instead of hardcoded "10"
+    temperature = data["temperature"] # CHANGED: read from data instead of hardcoded "10"
+
+    total_sensors = 1
+
+    sensor_data = {
+        "sensorId":    sensor_id,
+        "ppm":         ppm,
+        "humidity":    humidity,
+        "temperature": temperature
+    }
+
+    X             = np.array([[ppm, temperature, humidity]])
+    prediction    = model.predict(X)[0]
+    confidence    = model.predict_proba(X)[0]
+    sensor_alert  = "High" if prediction == 1 and np.max(confidence) > 0.8 else \
+                    "Alert" if prediction == 1 else "good"
+
+    sensor_data["sensor_alert"]  = sensor_alert
+    sensor_data["confidence"]    = float(np.max(confidence)) # CHANGED: added confidence to payload
+
+    sensor_buffer[sensor_id] = {
+        "ppm":         ppm,
+        "humidity":    humidity,
+        "temperature": temperature
+    }
+
+    history_buffer.append(sensor_data)
+
+    payload = {
+        "total_sensors": total_sensors,
+        "sensors":       [sensor_data],
+        "history":       list(history_buffer)
+    }
+
+    client.publish(TOPIC_RESULTS, json.dumps(payload))
+
+    print(f"[Sensor {sensor_id}] {ppm} ppm | {temperature}°C | {humidity}%")
+    print(f"[History] {len(history_buffer)}/10 entries stored")
+
+
+def prediction_loop(mqtt_client: MqttClient):
+    while True:
+        time.sleep(PREDICTION_INTERVAL)
+
+        if len(sensor_buffer) < TOTAL_NUMBER_OF_SENSORS:
+            print(f"[Pipeline] Waiting... {len(sensor_buffer)}/{TOTAL_NUMBER_OF_SENSORS} sensors reported")
+            continue
+
+        print(f"[Pipeline] Running prediction on {len(sensor_buffer)} sensors")
+
+        snapshot = dict(sensor_buffer)
+        sensor_buffer.clear()
+
+        ordered_ids = sorted(snapshot.keys())
+        matrix      = [
+            [snapshot[sid]["ppm"], snapshot[sid]["temperature"], snapshot[sid]["humidity"]]
+            for sid in ordered_ids
+        ]
+
+        X             = np.array(matrix)
+        predictions   = model.predict(X)
+        confidences   = model.predict_proba(X)
+        final_decision = "leak" if any(predictions == 1) else "no_leak"
+        xgb_confidence = float(np.max(confidences[:, 1]))
+
+        print(f"[Pipeline] Decision: {final_decision} (XGB confidence: {xgb_confidence:.2f})")
+
+        if final_decision != "leak":
+            print("[Pipeline] No leak — skipping publish")
+            continue
+
+        payload = {
+            "event_id":    str(uuid.uuid4()),
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+            "prediction": {
+                "final_decision": final_decision,
+                "xgb_confidence": xgb_confidence,
+            },
+            "sensors": [
+                {
+                    "sensor_id":   sid,
+                    "ppm":         snapshot[sid]["ppm"],
+                    "temperature": snapshot[sid]["temperature"],
+                    "humidity":    snapshot[sid]["humidity"],
+                    "timestamp":   int(time.time())
+                }
+                for sid in ordered_ids
+            ]
+        }
+
+        mqtt_client.publish(TOPIC_RESULTS, payload)
+
+
+def main():
+    mqtt_client = MqttClient(
+        broker  = BROKER,
+        port    = PORT,
+        topic   = TOPIC_SENSORS,
+        on_data = handle_mqtt_data
+    )
+
+    worker        = Thread(target=prediction_loop, args=(mqtt_client,))
+    worker.daemon = True
+    worker.start()
+
+    mqtt_client.connect()
+
+if __name__ == "__main__":
+    main()
