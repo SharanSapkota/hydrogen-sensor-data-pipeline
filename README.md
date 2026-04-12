@@ -1,3 +1,18 @@
+# Hydrogen Leak Detection System
+
+![System Banner](https://github.com/user-attachments/assets/5cd5ee38-0ef2-4a6c-9887-70c5ba91c2a3)
+
+## Overview
+
+An AI-powered hydrogen leak detection system that runs on a Raspberry Pi. The system monitors multiple sensor inputs in real time, uses a trained XGBoost model to distinguish genuine leaks from false alarms, and delivers instant alerts to your phone.
+
+---
+
+## Repository Structure
+- /app
+- working.py
+- readme.md
+
 ## Two Codebases — One System
 
 **`working.py`** is the file currently running on the Raspberry Pi. It is live, tested, and functional. This is what powers the system right now.
